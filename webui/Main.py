@@ -63,6 +63,7 @@ from app.services import task as tm
 from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
+from webui import narration as narration_ui
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -1436,6 +1437,7 @@ def _apply_restored_params(params):
     新增字段时只更新其中一条路径。调用方必须在渲染任何控件之前执行，否则
     Streamlit 会拒绝修改已经实例化的控件状态。
     """
+    narration_ui.restore(params)
     video_terms = params.get("video_terms") or ""
     if isinstance(video_terms, list):
         video_terms = ", ".join(str(term) for term in video_terms)
@@ -4065,7 +4067,7 @@ def _loomloom_video_coverage_plan(params):
         return None
 
     voice_rate = _effective_voice_rate_before_audio_panel()
-    actual_duration = _matching_full_voice_preview_duration(script, voice_rate)
+    actual_duration = None if narration_ui.enabled() else _matching_full_voice_preview_duration(script, voice_rate)
     if actual_duration is not None:
         duration_min = duration_max = actual_duration
         basis_key = "AI Video Duration Basis Actual"
@@ -4889,16 +4891,21 @@ def _render_script_settings(panel, params):
                         )
 
             # 模型发现只增强视频素材，不改变用户明确选择的文案 Provider。
-            if _effective_script_generation_backend() == "loomloom":
-                _render_loomloom_script_generation(params)
+            if narration_ui.enabled():
+                narration_ui.render_script_controls(
+                    params, tr, _run_llm_read_operation, _effective_script_generation_backend()
+                )
             else:
-                _render_local_script_generation(params)
-            params.video_script = st.text_area(
-                tr("Video Script"),
-                help=tr("Video Script Help"),
-                height=180,
-                key="video_script",
-            )
+                if _effective_script_generation_backend() == "loomloom":
+                    _render_loomloom_script_generation(params)
+                else:
+                    _render_local_script_generation(params)
+                params.video_script = st.text_area(
+                    tr("Video Script"),
+                    help=tr("Video Script Help"),
+                    height=180,
+                    key="video_script",
+                )
             if _effective_script_generation_backend() == "loomloom":
                 st.caption(tr("LoomLoom Video Terms Reuse Help"))
             elif st.button(
@@ -5754,7 +5761,7 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
     正常 TTS 流程。字幕时间轴和有效时长同样是必需条件，避免只复用音频后让
     Edge 字幕链路失去 SubMaker。
     """
-    if voice_mode != VOICE_MODE_TTS:
+    if narration_ui.enabled() or voice_mode != VOICE_MODE_TTS:
         return None
 
     script_content = str(params.video_script or "").strip()
@@ -6334,15 +6341,19 @@ def _render_audio_settings(panel, params):
                 VOICE_MODE_UPLOAD: tr("Upload Voiceover"),
                 VOICE_MODE_NONE: tr("No Voiceover"),
             }
-            voice_mode = stable_segmented_control(
-                tr("Voiceover Mode"),
-                options=voice_mode_options,
-                default_value=saved_voice_mode,
-                key="voice_mode_control",
-                format_func=lambda value: voice_mode_labels[value],
-                width="stretch",
-            )
-            _set_runtime_config("ui", "voice_mode", voice_mode)
+            if narration_ui.enabled():
+                voice_mode = VOICE_MODE_TTS
+                st.caption(tr("Multiple narrators use automatic voiceover. Uploads and single-voice previews are unavailable."))
+            else:
+                voice_mode = stable_segmented_control(
+                    tr("Voiceover Mode"),
+                    options=voice_mode_options,
+                    default_value=saved_voice_mode,
+                    key="voice_mode_control",
+                    format_func=lambda value: voice_mode_labels[value],
+                    width="stretch",
+                )
+                _set_runtime_config("ui", "voice_mode", voice_mode)
             tts_mode_enabled = voice_mode == VOICE_MODE_TTS
 
             # Provider 下拉只负责选择自动配音服务；无配音已经由上方模式控制，
@@ -6510,7 +6521,9 @@ def _render_audio_settings(panel, params):
                 saved_voice_name_index = 0
 
             # 确保有声音可选
-            if tts_mode_enabled and friendly_names:
+            if narration_ui.enabled():
+                voice_name = narration_ui.render_narrators(friendly_names, tr)
+            elif tts_mode_enabled and friendly_names:
                 voice_name = stable_selectbox(
                     tr("Voiceover Voice"),
                     options=list(friendly_names.keys()),
@@ -6804,7 +6817,7 @@ def _render_audio_settings(panel, params):
             voice_volume_options = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0]
             voice_rate_options = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0]
 
-            if tts_mode_enabled:
+            if tts_mode_enabled and not narration_ui.enabled():
                 voice_control_cols = st.columns(2)
                 with voice_control_cols[0]:
                     params.voice_volume = stable_selectbox(
@@ -7236,6 +7249,8 @@ def _render_generation_controls(
     )
     render_onboarding_tour()
     if start_button:
+        if not narration_ui.prepare_submission(params, voice_mode, uploaded_audio_file, tr):
+            return False
         _save_runtime_config()
         task_id = st.session_state.get("pending_generation_task_id") or str(uuid4())
         _add_active_generation_task(
@@ -7591,6 +7606,8 @@ def _render_application():
     right_panel = panel[3]
 
     params = VideoParams(video_subject="")
+    with left_panel:
+        narration_ui.render_mode_control(tr)
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)
     )
