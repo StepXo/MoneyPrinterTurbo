@@ -6343,7 +6343,7 @@ def _render_audio_settings(panel, params):
             }
             if narration_ui.enabled():
                 voice_mode = VOICE_MODE_TTS
-                st.caption(tr("Multiple narrators use automatic voiceover. Uploads and single-voice previews are unavailable."))
+                st.caption(tr("Multiple narrators use automatic voiceover. Uploaded audio is unavailable."))
             else:
                 voice_mode = stable_segmented_control(
                     tr("Voiceover Mode"),
@@ -6522,7 +6522,8 @@ def _render_audio_settings(panel, params):
 
             # 确保有声音可选
             if narration_ui.enabled():
-                voice_name = narration_ui.render_narrators(friendly_names, tr)
+                narrator_preview_slots = {}
+                voice_name = narration_ui.render_narrators(friendly_names, tr, narrator_preview_slots)
             elif tts_mode_enabled and friendly_names:
                 voice_name = stable_selectbox(
                     tr("Voiceover Voice"),
@@ -6817,7 +6818,7 @@ def _render_audio_settings(panel, params):
             voice_volume_options = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0]
             voice_rate_options = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0]
 
-            if tts_mode_enabled and not narration_ui.enabled():
+            if tts_mode_enabled:
                 voice_control_cols = st.columns(2)
                 with voice_control_cols[0]:
                     params.voice_volume = stable_selectbox(
@@ -6846,12 +6847,19 @@ def _render_audio_settings(panel, params):
                 _set_runtime_config("ui", "voice_rate", params.voice_rate)
 
                 # 试听必须位于音量和语速控件之后，确保调用使用当前控件值。
-                _render_voice_preview(
-                    params,
-                    friendly_names,
-                    selected_tts_server,
-                    voice_name,
-                )
+                if narration_ui.enabled():
+                    narration_ui.render_audio_controls(
+                        params, tr, _synthesize_voice_preview, _get_voice_preview_sample,
+                        _estimate_voiceover_duration_range, selected_tts_server,
+                        narrator_preview_slots,
+                    )
+                else:
+                    _render_voice_preview(
+                        params,
+                        friendly_names,
+                        selected_tts_server,
+                        voice_name,
+                    )
             elif voice_mode == VOICE_MODE_UPLOAD:
                 custom_audio_file_types = sorted(
                     extension.removeprefix(".") for extension in CUSTOM_AUDIO_EXTENSIONS
@@ -7607,11 +7615,15 @@ def _render_application():
 
     params = VideoParams(video_subject="")
     with left_panel:
-        narration_ui.render_mode_control(tr)
+        unlock_narration_mode = narration_ui.render_mode_control(tr)
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)
     )
-    _render_script_settings(left_panel, params)
+    try:
+        _render_script_settings(left_panel, params)
+    finally:
+        if unlock_narration_mode:
+            unlock_narration_mode()
 
     uploaded_files = _render_video_settings(middle_panel, params)
     uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(

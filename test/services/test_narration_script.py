@@ -163,6 +163,51 @@ class TestNarrationScript(unittest.TestCase):
         self.assertNotIn("secret-credential", str(caught.exception))
         generate.assert_called_once()
 
+    def test_sanitized_categories_and_last_attempt(self):
+        cases = [
+            ("", "EMPTY_RESPONSE"),
+            ("secret not JSON", "JSON_DECODE_ERROR"),
+            ("[]", "INVALID_ROOT"),
+            ("{}", "MISSING_SEGMENTS"),
+            ('{"segments":{}}', "INVALID_SCHEMA"),
+            ('{"segments":[{}]}', "INVALID_SEGMENT"),
+            ('{"segments":[{"speaker_id":"secret","text":"Hi"}]}', "UNKNOWN_SPEAKER"),
+            ('{"segments":[{"speaker_id":"host_id","text":" "}]}', "EMPTY_TEXT"),
+            ('{"segments":[]}', "DOMAIN_VALIDATION_ERROR"),
+        ]
+        for response, category in cases:
+            with (
+                self.subTest(category=category),
+                patch.object(
+                    llm, "generate_text", side_effect=["bad", response]
+                ) as generate,
+                patch.object(narration_script.logger, "warning") as log,
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    narration_script.generate("Coffee", self.narrators)
+                self.assertIn(
+                    narration_script._DIAGNOSTICS[category], str(caught.exception)
+                )
+                self.assertEqual(generate.call_count, 2)
+                self.assertEqual(log.call_args_list[0].args[2], "JSON_DECODE_ERROR")
+                self.assertEqual(log.call_args_list[1].args[2], category)
+                self.assertNotIn(
+                    "secret", str(log.call_args_list) + str(caught.exception)
+                )
+                self.assertNotIn("private-voice", str(log.call_args_list))
+
+    def test_provider_exception_is_not_retried_or_classified_as_json(self):
+        error = RuntimeError("provider unavailable")
+        with (
+            patch.object(llm, "generate_text", side_effect=error) as generate,
+            patch.object(narration_script.logger, "warning") as log,
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                narration_script.generate("Coffee", self.narrators)
+        self.assertIs(caught.exception, error)
+        generate.assert_called_once()
+        self.assertIn("PROVIDER_ERROR", log.call_args.args[0])
+
 
 class TestRawTextBoundary(unittest.TestCase):
     def test_raw_text_and_configuration_pass_through(self):

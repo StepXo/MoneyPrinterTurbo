@@ -141,6 +141,65 @@ class TestNarrationAdapter(unittest.TestCase):
             ["voice_A", "voice_B", "voice_C"],
         )
 
+    def test_preview_volume_opt_in_and_default_invariants(self):
+        self.params.voice_volume = 0.6
+        self.params.voice_rate = 1.2
+        self.params.narration.segments[2].speaker_id = "C"
+        with patch.object(
+            adapter, "_apply_preview_volume", wraps=adapter._apply_preview_volume
+        ) as gain:
+            baseline = self.prepare()
+            self.calls.clear()
+            explicit = adapter.prepare("test-task", self.params, apply_volume=False)
+            gain.assert_not_called()
+            self.assertEqual(
+                Path(baseline.audio_file).read_bytes(),
+                Path(explicit.audio_file).read_bytes(),
+            )
+            self.calls.clear()
+            preview = adapter.prepare("test-task", self.params, apply_volume=True)
+            gain.assert_called_once_with(Path(preview.audio_file), 0.6)
+        self.assertEqual(preview.audio_duration, baseline.audio_duration)
+        self.assertEqual(
+            Path(preview.subtitle_path).read_bytes(),
+            Path(baseline.subtitle_path).read_bytes(),
+        )
+        self.assertEqual(
+            [call["voice_name"] for call in self.calls],
+            ["voice_A", "voice_B", "voice_C"],
+        )
+        self.assertTrue(
+            all(
+                call["voice_rate"] == 1.2 and "voice_volume" not in call
+                for call in self.calls
+            )
+        )
+        with wave.open(preview.audio_file, "rb") as master:
+            self.assertEqual(master.getnframes(), 72000)
+            for index in range(3):
+                master.setpos(index * 24000 + 12000)
+                self.assertAlmostEqual(
+                    struct.unpack("<h", master.readframes(1))[0],
+                    (index + 1) * 600,
+                    delta=2,
+                )
+
+    def test_preview_volume_failure_cleans_owned_files(self):
+        run = subprocess.run
+        failure = subprocess.CalledProcessError(1, "ffmpeg preview volume")
+
+        def fail_volume(command, **kwargs):
+            if "-af" in command:
+                Path(command[-1]).write_bytes(b"partial preview")
+                raise failure
+            return run(command, **kwargs)
+
+        with patch.object(adapter.subprocess, "run", side_effect=fail_volume):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                adapter.prepare("test-task", self.params, apply_volume=True)
+        self.assertIs(caught.exception, failure)
+        self.assert_clean_failure()
+
     def test_failed_middle_segment_never_skipped(self):
         for failure in ("none", "missing", "corrupt", "exception"):
             with self.subTest(failure=failure):

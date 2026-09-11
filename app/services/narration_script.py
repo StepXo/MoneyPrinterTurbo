@@ -3,7 +3,10 @@
 import json
 import re
 
-from app.models.narration import MultiNarration, Narrator
+from loguru import logger
+from pydantic import ValidationError
+
+from app.models.narration import MultiNarration, NarrationSegment, Narrator
 from app.services import llm
 
 _OUTPUT_INSTRUCTIONS = """# Structured narration output (overrides earlier output-format instructions):
@@ -22,21 +25,65 @@ Return ONLY valid JSON matching the required schema and supplied speaker IDs.
 """
 
 
+_DIAGNOSTICS = {
+    "EMPTY_RESPONSE": "empty response",
+    "JSON_DECODE_ERROR": "malformed JSON",
+    "INVALID_ROOT": "expected a JSON object",
+    "INVALID_SCHEMA": "incorrect JSON schema",
+    "MISSING_SEGMENTS": "missing segments",
+    "INVALID_SEGMENT": "invalid segment fields",
+    "UNKNOWN_SPEAKER": "unknown speaker ID",
+    "EMPTY_TEXT": "empty segment text",
+    "DOMAIN_VALIDATION_ERROR": "invalid narration data",
+}
+
+
+class _StructuredError(ValueError):
+    def __init__(self, category):
+        self.category = category
+        super().__init__(_DIAGNOSTICS[category])
+
+
 def _parse(response: str, narrators: list[Narrator]) -> MultiNarration:
+    if not isinstance(response, str):
+        raise _StructuredError("INVALID_ROOT")
     response = response.strip()
+    if not response:
+        raise _StructuredError("EMPTY_RESPONSE")
     fence = re.fullmatch(r"```json\s*\n(.*?)\n```", response, flags=re.DOTALL)
     if fence:
         response = fence.group(1).strip()
-    payload = json.loads(response)
-    if not isinstance(payload, dict) or set(payload) != {"segments"}:
-        raise ValueError("expected an object containing only segments")
+    try:
+        payload = json.loads(response)
+    except json.JSONDecodeError:
+        raise _StructuredError("JSON_DECODE_ERROR") from None
+    if not isinstance(payload, dict):
+        raise _StructuredError("INVALID_ROOT")
+    if "segments" not in payload:
+        raise _StructuredError("MISSING_SEGMENTS")
+    if set(payload) != {"segments"}:
+        raise _StructuredError("INVALID_SCHEMA")
     segments = payload["segments"]
     if not isinstance(segments, list):
-        raise ValueError("segments must be a list")
+        raise _StructuredError("INVALID_SCHEMA")
     for segment in segments:
         if not isinstance(segment, dict) or set(segment) != {"speaker_id", "text"}:
-            raise ValueError("each segment must contain only speaker_id and text")
-    return MultiNarration(narrators=narrators, segments=segments)
+            raise _StructuredError("INVALID_SEGMENT")
+    try:
+        validated = [NarrationSegment.model_validate(segment) for segment in segments]
+        if any(
+            segment.speaker_id not in {n.id for n in narrators} for segment in validated
+        ):
+            raise _StructuredError("UNKNOWN_SPEAKER")
+        return MultiNarration(narrators=narrators, segments=validated)
+    except ValidationError as exc:
+        category = "DOMAIN_VALIDATION_ERROR"
+        if any(
+            error["loc"] == ("text",) and error["type"] == "string_too_short"
+            for error in exc.errors()
+        ):
+            category = "EMPTY_TEXT"
+        raise _StructuredError(category) from None
 
 
 def generate(
@@ -72,22 +119,32 @@ def generate(
         separators=(",", ":"),
     )
     for attempt in range(2):
-        response = llm.generate_text(
-            prompt=prompt if attempt == 0 else prompt + "\n" + _CORRECTION,
-            app_config=app_config,
-        )
+        try:
+            response = llm.generate_text(
+                prompt=prompt if attempt == 0 else prompt + "\n" + _CORRECTION,
+                app_config=app_config,
+            )
+        except Exception:
+            logger.warning(
+                "Structured narration attempt {} failed: PROVIDER_ERROR", attempt + 1
+            )
+            raise
         if isinstance(response, str) and response.lstrip().startswith("Error:"):
+            logger.warning(
+                "Structured narration attempt {} failed: PROVIDER_ERROR", attempt + 1
+            )
             # Do not echo provider diagnostics, credentials, or raw responses.
             raise RuntimeError(
                 "multi-narrator structured script generation failed: LLM provider error"
             )
         try:
-            if not isinstance(response, str):
-                raise ValueError("expected text response")
             return _parse(response, narrators)
-        except ValueError:
+        except _StructuredError as exc:
+            logger.warning(
+                "Structured narration attempt {} failed: {}", attempt + 1, exc.category
+            )
             if attempt == 1:
                 raise ValueError(
-                    "multi-narrator structured script generation failed: "
-                    "invalid JSON structure or speaker/text validation after 2 attempts"
+                    "multi-narrator structured script generation failed after 2 attempts. "
+                    f"Last validation error: {exc}."
                 ) from None

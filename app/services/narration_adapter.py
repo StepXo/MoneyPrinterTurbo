@@ -116,11 +116,43 @@ def _append_pcm(source: Path, normalized: Path, master) -> int:
     return frames
 
 
-def prepare(task_id: str, params: VideoParams) -> NarrationArtifacts:
+def _apply_preview_volume(audio_path: Path, volume: float):
+    """Apply linear gain once to the preview master, leaving timing unchanged."""
+    target = audio_path.with_name("preview.wav")
+    subprocess.run(
+        [
+            utils.get_ffmpeg_binary(),
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(audio_path),
+            "-af",
+            f"volume={float(volume)}",
+            "-codec:a",
+            "pcm_s16le",
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    with (
+        wave.open(str(audio_path), "rb") as source,
+        wave.open(str(target), "rb") as result,
+    ):
+        if source.getparams() != result.getparams():
+            raise RuntimeError("preview volume processing changed audio timing/format")
+    target.replace(audio_path)
+
+
+def prepare(
+    task_id: str, params: VideoParams, *, apply_volume: bool = False
+) -> NarrationArtifacts:
     """Return a WAV master and optional SRT; any failure removes this run only.
 
     Uses the current subtitle provider and existing TTS pause behavior. Callers
     must keep runtime provider configuration stable, as the existing worker does.
+    Only direct audio previews opt into volume; video rendering applies its own.
     """
     if params.narration is None:
         raise ValueError("multi narration is required")
@@ -208,6 +240,8 @@ def prepare(task_id: str, params: VideoParams) -> NarrationArtifacts:
                     ),
                     encoding="utf-8",
                 )
+        if apply_volume:
+            _apply_preview_volume(audio_path, params.voice_volume)
         return NarrationArtifacts(
             str(audio_path),
             total_samples / _SAMPLE_RATE,
