@@ -3,6 +3,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.models.llm_provider import get_llm_provider
 from app.utils import utils
@@ -13,6 +14,10 @@ WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 I18N_DIR = ROOT_DIR / "webui" / "i18n"
 LLM_PROVIDER_TIPS_PREFIX = "llm_provider_tips."
 TTS_PROVIDER_TIPS_PREFIX = "tts_provider_tips."
+# Multi-narrator V1 explicitly uses readable keys without adding locale entries.
+READABLE_FALLBACK_KEYS = frozenset(
+    {"Multiple narrators use automatic voiceover. Uploaded audio is unavailable."}
+)
 SECONDARY_LOCALES = ("az", "de", "es", "fr", "id", "it", "ko", "pt", "ru", "tr", "vi")
 PROVIDER_TIPS_PREFIXES = (
     LLM_PROVIDER_TIPS_PREFIX,
@@ -170,7 +175,32 @@ class TestWebuiI18n(unittest.TestCase):
 
         en_keys = set(_load_translation("en"))
 
-        self.assertEqual(sorted(visitor.keys - en_keys), [])
+        self.assertEqual(sorted(visitor.keys - en_keys - READABLE_FALLBACK_KEYS), [])
+
+    def test_multi_narrator_readable_keys_use_runtime_translation_fallback(self):
+        tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+        translate = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "tr"
+        )
+        state = {"ui_language": "en"}
+        namespace = {
+            "st": SimpleNamespace(session_state=state),
+            "locales": {"en": {"Translation": _load_translation("en")}},
+        }
+        exec(
+            compile(
+                ast.Module(body=[translate], type_ignores=[]), str(WEBUI_MAIN), "exec"
+            ),
+            namespace,
+        )
+        for locale in ("en", *SECONDARY_LOCALES):
+            namespace["locales"][locale] = {"Translation": _load_translation(locale)}
+            state["ui_language"] = locale
+            for key in READABLE_FALLBACK_KEYS:
+                with self.subTest(locale=locale, key=key):
+                    self.assertEqual(namespace["tr"](key), key)
 
     def test_shengsuanyun_provider_tips_keep_registration_and_model_links(self):
         """合作入口和模型目录属于产品配置，避免后续改文案时误删追踪链接。"""
@@ -234,7 +264,12 @@ class TestWebuiI18n(unittest.TestCase):
             with self.subTest(locale=locale):
                 locale_keys = set(_load_translation(locale))
                 self.assertEqual(
-                    sorted(visitor.keys - locale_keys - ENGLISH_FALLBACK_KEYS),
+                    sorted(
+                        visitor.keys
+                        - locale_keys
+                        - ENGLISH_FALLBACK_KEYS
+                        - READABLE_FALLBACK_KEYS
+                    ),
                     [],
                 )
 
