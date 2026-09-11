@@ -6,6 +6,7 @@ import pydantic
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import config
+from app.models.narration import MultiNarration
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -105,6 +106,7 @@ class VideoParams(BaseModel):
 
     video_subject: str
     video_script: str = ""  # Script used to generate the video
+    narration: MultiNarration | None = None
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_fit_mode: VideoFitMode = VideoFitMode.cover

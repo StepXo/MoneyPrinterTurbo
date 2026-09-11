@@ -634,6 +634,11 @@ def _generate_response(prompt: str, app_config=None) -> str:
         return f"Error: {_sanitize_error_message(e)}"
 
 
+def generate_text(prompt: str, app_config=None) -> str:
+    """Return provider text without script-specific cleanup or retries."""
+    return _generate_response(prompt=prompt, app_config=app_config)
+
+
 def test_connection() -> tuple[bool, str, float]:
     """
     使用当前 Provider 配置发起一次最小请求，验证实际生成链路是否可用。

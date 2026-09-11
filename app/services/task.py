@@ -22,6 +22,7 @@ from app.services import (
     loomloom,
     material,
     metaso_minimax,
+    narration_adapter,
     ofox,
     sonilo,
     subtitle,
@@ -1361,6 +1362,22 @@ def _run_pipeline(
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
+    narration = getattr(params, "narration", None)
+    if narration is not None:
+        if stop_at != "video":
+            return _mark_task_failed(
+                task_id, "preflight", "multi narration requires full-video generation"
+            )
+        if params.custom_audio_file or voice_preview is not None:
+            return _mark_task_failed(
+                task_id, "preflight", "multi narration cannot use custom audio or voice previews"
+            )
+        if voice.is_no_voice(params.voice_name):
+            return _mark_task_failed(
+                task_id, "preflight", "multi narration cannot use no-voice mode"
+            )
+        params.video_script = utils.remove_pause_tags(narration.flatten_script())
+
     if (
         stop_at in {"materials", "video"}
         and params.video_source == "volcengine_seedance"
@@ -1499,45 +1516,51 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
-    # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        voice_preview=voice_preview,
-        allow_server_file_input=allow_server_file_input,
-    )
-    if not audio_file:
-        return _mark_task_failed(
+    if narration is not None:
+        artifacts = narration_adapter.prepare(task_id, params)
+        audio_file = artifacts.audio_file
+        audio_duration = artifacts.audio_duration
+        subtitle_path = artifacts.subtitle_path
+    else:
+        # 3. Generate audio
+        audio_file, audio_duration, sub_maker = generate_audio(
             task_id,
-            "audio",
-            "failed to prepare narration audio",
+            params,
+            video_script,
+            voice_preview=voice_preview,
+            allow_server_file_input=allow_server_file_input,
+        )
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "failed to prepare narration audio",
+            )
+
+        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+
+        if stop_at == "audio":
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_COMPLETE,
+                progress=100,
+                audio_file=audio_file,
+            )
+            return {"audio_file": audio_file, "audio_duration": audio_duration}
+
+        # 4. Generate subtitle
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
         )
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
-
-    if stop_at == "audio":
-        sm.state.update_task(
-            task_id,
-            state=const.TASK_STATE_COMPLETE,
-            progress=100,
-            audio_file=audio_file,
-        )
-        return {"audio_file": audio_file, "audio_duration": audio_duration}
-
-    # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
-
-    if stop_at == "subtitle":
-        sm.state.update_task(
-            task_id,
-            state=const.TASK_STATE_COMPLETE,
-            progress=100,
-            subtitle_path=subtitle_path,
-        )
-        return {"subtitle_path": subtitle_path}
+        if stop_at == "subtitle":
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_COMPLETE,
+                progress=100,
+                subtitle_path=subtitle_path,
+            )
+            return {"subtitle_path": subtitle_path}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
