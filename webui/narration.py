@@ -19,6 +19,76 @@ _DATA = "narration_data"
 _ENABLED = "narration_enabled"
 
 
+def normalize_configuration(payload):
+    """Validate portable narrator preferences without accepting editor state."""
+    if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+        raise ValueError("invalid multi-narrator configuration")
+    raw_narrators = payload.get("narrators")
+    if not isinstance(raw_narrators, list):
+        raise ValueError("invalid multi-narrator narrator list")
+    narrators = [Narrator.model_validate(item) for item in raw_narrators]
+    if narrators and len(narrators) < 2:
+        raise ValueError("multi-narrator configuration requires at least two narrators")
+    if payload["enabled"] and len(narrators) < 2:
+        raise ValueError("enabled multi-narrator configuration requires two narrators")
+    if len({item.id for item in narrators}) != len(narrators):
+        raise ValueError("narrator IDs must be unique")
+    if len({item.display_name for item in narrators}) != len(narrators):
+        raise ValueError("narrator names must be unique")
+    result = {
+        "enabled": payload["enabled"],
+        "narrators": [item.model_dump() for item in narrators],
+    }
+    if "tts_server" in payload:
+        server = payload["tts_server"]
+        if not isinstance(server, str) or not server.strip():
+            raise ValueError("invalid multi-narrator voice provider")
+        result["tts_server"] = server
+    return result
+
+
+def configuration():
+    """Return only persistent preferences, never segments or preview state."""
+    payload = {
+        "enabled": enabled(),
+        "narrators": copy.deepcopy(_data()["narrators"]),
+        "tts_server": config.ui.get("tts_server", "azure-tts-v1"),
+    }
+    try:
+        return normalize_configuration(payload)
+    except ValueError:
+        return {"enabled": False, "narrators": []}
+
+
+def restore_configuration(payload):
+    """Restore preferences before widgets render and discard old editor state."""
+    settings = normalize_configuration(payload)
+    for key in list(st.session_state):
+        if key.startswith(
+            ("narration_name_", "narration_voice_", "narration_speaker_", "narration_text_")
+        ):
+            del st.session_state[key]
+    st.session_state[_ENABLED] = settings["enabled"]
+    st.session_state[_DATA] = {
+        "narrators": copy.deepcopy(settings["narrators"]),
+        "segments": [],
+        "next_narrator": max(
+            [
+                int(item["id"].removeprefix("narrator_"))
+                for item in settings["narrators"]
+                if item["id"].startswith("narrator_")
+                and item["id"].removeprefix("narrator_").isdigit()
+            ]
+            + [0]
+        )
+        + 1,
+        "next_segment": 1,
+        "voices": {
+            item["voice_name"]: item["voice_name"] for item in settings["narrators"]
+        },
+    }
+
+
 def enabled():
     return bool(st.session_state.get(_ENABLED, False))
 

@@ -250,6 +250,7 @@ PRESET_EXCLUDED_PARAM_KEYS = frozenset(
         "video_materials",
         "custom_audio_file",
         "bgm_file",
+        "narration",
     }
 )
 # 密钥按配置项名称后缀识别。新增 Provider 只要沿用现有命名，就会自动进入
@@ -720,6 +721,14 @@ def _initialize_session_state():
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+    if "narration_enabled" not in st.session_state:
+        try:
+            narration_ui.restore_configuration(
+                config.ui.get("multi_narrator", {"enabled": False, "narrators": []})
+            )
+        except ValueError as exc:
+            logger.warning(f"ignoring invalid saved multi-narrator configuration: {exc}")
+            narration_ui.restore_configuration({"enabled": False, "narrators": []})
 
 
 _initialize_session_state()
@@ -1443,7 +1452,10 @@ def _apply_restored_params(params):
     新增字段时只更新其中一条路径。调用方必须在渲染任何控件之前执行，否则
     Streamlit 会拒绝修改已经实例化的控件状态。
     """
-    narration_ui.restore(params)
+    if "multi_narrator" in params:
+        narration_ui.restore_configuration(params["multi_narrator"])
+    else:
+        narration_ui.restore(params)
     video_terms = params.get("video_terms") or ""
     if isinstance(video_terms, list):
         video_terms = ", ".join(str(term) for term in video_terms)
@@ -1497,6 +1509,8 @@ def _apply_restored_params(params):
     # 音频设置。TTS server 未写入旧任务，根据历史 voice_name 推断。
     voice_name = params.get("voice_name") or voice.NO_VOICE_NAME
     tts_server = _infer_tts_server_from_voice(voice_name)
+    if "multi_narrator" in params and params["multi_narrator"].get("tts_server"):
+        tts_server = params["multi_narrator"]["tts_server"]
     if params.get("custom_audio_file"):
         voice_mode = VOICE_MODE_UPLOAD
     elif voice.is_no_voice(voice_name):
@@ -2840,13 +2854,18 @@ def _parse_key_backup(raw_bytes, config_sections):
     return restored
 
 
-def _build_settings_preset_payload(params, app_version):
+def _build_settings_preset_payload(params, app_version, multi_narrator=None):
     """构造生成参数预设文件内容。"""
     preset_params = {
         key: value
         for key, value in params.items()
         if key not in PRESET_EXCLUDED_PARAM_KEYS
     }
+    if multi_narrator is not None:
+        preset_params["multi_narrator"] = narration_ui.normalize_configuration(multi_narrator)
+        if multi_narrator["enabled"]:
+            preset_params.pop("video_script", None)
+            preset_params.pop("video_terms", None)
     if params.get("bgm_type") == "preset" and params.get("bgm_file"):
         try:
             builtin_bgm_path = bgm_service.resolve_builtin_bgm_file(
@@ -2883,7 +2902,7 @@ def _parse_settings_preset(raw_bytes):
     params_input = {
         key: value
         for key, value in preset_params.items()
-        if key not in PRESET_EXCLUDED_PARAM_KEYS
+        if key not in PRESET_EXCLUDED_PARAM_KEYS and key != "multi_narrator"
     }
     if preset_params.get("bgm_type") == "preset" and preset_params.get("bgm_file"):
         # 设置预设只能恢复当前版本真实存在的内置歌曲。服务层同时拒绝目录分隔符
@@ -2894,7 +2913,12 @@ def _parse_settings_preset(raw_bytes):
         params_input["bgm_file"] = Path(builtin_bgm_path).name
     # video_subject 是 VideoParams 的必填字段，但预设允许只保存风格设置。
     params_input.setdefault("video_subject", "")
-    return VideoParams.model_validate(params_input).model_dump(mode="json")
+    restored = VideoParams.model_validate(params_input).model_dump(mode="json")
+    if "multi_narrator" in preset_params:
+        restored["multi_narrator"] = narration_ui.normalize_configuration(
+            preset_params["multi_narrator"]
+        )
+    return restored
 
 
 def _apply_key_backup(restored_keys):
@@ -2919,6 +2943,8 @@ def _apply_pending_settings_preset():
     if not preset_params:
         return False
 
+    if "multi_narrator" not in preset_params and "narration" not in preset_params:
+        preset_params = {**preset_params, "multi_narrator": {"enabled": False, "narrators": []}}
     _apply_restored_params(preset_params)
     logger.info("applied imported settings preset")
     return True
@@ -2929,7 +2955,8 @@ def _render_settings_transfer(params):
     with st.expander(tr("Settings Preset"), expanded=False):
         st.caption(tr("Settings Preset Help"))
         preset_payload = _build_settings_preset_payload(
-            params.model_dump(mode="json"), config.project_version
+            params.model_dump(mode="json"), config.project_version,
+            narration_ui.configuration(),
         )
         st.download_button(
             tr("Export Settings"),
@@ -5165,7 +5192,7 @@ def _render_video_settings(panel, params):
                     )
                 )
                 if params.video_source == "metaso_minimax"
-                else [2, 3, 4, 5, 6, 7, 8, 9, 10]
+                else [2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 60]
             )
             params.video_clip_duration = stable_selectbox(
                 tr("Clip Duration"),
@@ -7718,6 +7745,7 @@ def _render_application():
     uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
         audio_panel, params
     )
+    _set_runtime_config("ui", "multi_narrator", narration_ui.configuration())
 
     _render_subtitle_settings(right_panel, params)
 

@@ -3,10 +3,12 @@ import json
 from pathlib import Path
 
 import pytest
+import toml
 
 from app.models.llm_provider import LLM_PROVIDER_REGISTRY, get_llm_provider
 from app.models.schema import VideoParams
 from app.services import bgm as bgm_service
+from webui import narration as narration_ui
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -80,6 +82,7 @@ def _load_settings_transfer_helpers():
         "Path": Path,
         "VideoParams": VideoParams,
         "bgm_service": bgm_service,
+        "narration_ui": narration_ui,
         "LLM_PROVIDER_REGISTRY": LLM_PROVIDER_REGISTRY,
         # _apply_key_backup 写配置并清理控件状态，两者都由测试替身记录，
         # 这样可以验证真实实现而不需要启动 Streamlit 会话。
@@ -173,6 +176,65 @@ def test_settings_preset_round_trip_preserves_generation_settings():
     assert restored["stroke_width"] == 2.5
     assert restored["voice_volume"] == 0.8
     assert restored["paragraph_number"] == 3
+
+
+def test_multi_narrator_preset_and_toml_round_trip_exclude_transient_work():
+    narrators = [
+        {"id": f"narrator_{number}", "display_name": name, "voice_name": voice}
+        for number, name, voice in (
+            (2, "Host", "en-US-JennyNeural-Female"),
+            (7, "Guest", "en-US-GuyNeural-Male"),
+            (12, "Editor", "en-US-AriaNeural-Female"),
+        )
+    ]
+    configuration = {"enabled": True, "narrators": narrators}
+    params = VideoParams(
+        video_subject="Topic", voice_volume=1.5, voice_rate=1.2,
+        video_script="Generated dialogue.",
+        narration={
+            "narrators": narrators,
+            "segments": [{"speaker_id": "narrator_2", "text": "Generated dialogue."}],
+        },
+    ).model_dump(mode="json")
+    params["video_terms"] = "generated terms"
+
+    payload = build_settings_preset_payload(params, "1.3.7", configuration)
+    assert payload["params"]["multi_narrator"] == configuration
+    assert "narration" not in payload["params"]
+    assert "video_script" not in payload["params"]
+    assert "video_terms" not in payload["params"]
+    restored = parse_settings_preset(_encode(payload))
+    assert restored["multi_narrator"] == configuration
+    assert (restored["voice_volume"], restored["voice_rate"]) == (1.5, 1.2)
+    assert restored["narration"] is None
+    assert restored["video_script"] == ""
+    assert toml.loads(toml.dumps({"ui": {"multi_narrator": configuration}}))["ui"]["multi_narrator"] == configuration
+
+
+def test_multi_narrator_preset_rejects_malformed_config_and_legacy_stays_single():
+    legacy = build_settings_preset_payload(
+        VideoParams(video_subject="Legacy", video_script="Single script.").model_dump(mode="json"),
+        "1.3.6",
+    )
+    restored = parse_settings_preset(_encode(legacy))
+    assert "multi_narrator" not in restored
+    assert restored["video_script"] == "Single script."
+
+    for bad in (
+        {"enabled": True, "narrators": []},
+        {"enabled": "true", "narrators": []},
+        {"enabled": True, "narrators": [
+            {"id": "same", "display_name": "Host", "voice_name": "voice"},
+            {"id": "same", "display_name": "Guest", "voice_name": "voice"},
+        ]},
+        {"enabled": True, "narrators": [
+            {"id": "one", "display_name": "Host", "voice_name": ""},
+            {"id": "two", "display_name": "Guest", "voice_name": "voice"},
+        ]},
+    ):
+        invalid = {**legacy, "params": {**legacy["params"], "multi_narrator": bad}}
+        with pytest.raises(ValueError):
+            parse_settings_preset(_encode(invalid))
 
 
 def test_settings_preset_round_trip_preserves_builtin_bgm_filename():

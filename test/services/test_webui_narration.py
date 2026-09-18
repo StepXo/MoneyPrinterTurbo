@@ -411,6 +411,83 @@ def test_real_gui_restoration_uses_existing_preset_restore_boundary(app_environm
     assert widget(page.text_area, "video_script").value == "Legacy restored."
 
 
+def test_saved_multi_narrator_configuration_restores_without_editor_state(app_environment):
+    settings = {
+        "enabled": True,
+        "narrators": [
+            {"id": "narrator_2", "display_name": "Host", "voice_name": list(VOICES)[0]},
+            {"id": "narrator_7", "display_name": "Guest", "voice_name": list(VOICES)[1]},
+            {"id": "narrator_12", "display_name": "Third", "voice_name": list(VOICES)[0]},
+        ],
+    }
+    with patch.dict(config.ui, multi_narrator=settings, voice_volume=1.5, voice_rate=1.2):
+        page = app()
+        assert page.toggle(key="narration_enabled").value
+        assert page.session_state["narration_data"]["narrators"] == settings["narrators"]
+        assert page.session_state["narration_data"]["segments"] == []
+        assert widget(page.selectbox, "voice_volume_select").value == 1.5
+        assert widget(page.selectbox, "voice_rate_select").value == 1.2
+        assert page.text_input(key="narration_name_narrator_7").value == "Guest"
+        assert page.selectbox(key="narration_voice_narrator_7").value == list(VOICES)[1]
+        page.button(key="narration_add_narrator").click().run()
+        assert page.session_state["narration_data"]["narrators"][-1]["id"] == "narrator_13"
+
+
+def test_multi_narrator_changes_reach_existing_ui_config_and_new_session(app_environment):
+    page = app()
+    page.toggle(key="narration_enabled").set_value(True).run()
+    page.text_input(key="narration_name_narrator_2").set_value("Guest").run()
+    page.selectbox(key="narration_voice_narrator_2").set_value(list(VOICES)[1]).run()
+    widget(page.selectbox, "voice_volume_select").set_value(1.5).run()
+    widget(page.selectbox, "voice_rate_select").set_value(1.2).run()
+    page.button(key="narration_add_narrator").click().run()
+
+    saved = copy.deepcopy(config.ui["multi_narrator"])
+    assert saved["enabled"]
+    assert saved["tts_server"] == "azure-tts-v1"
+    assert len(saved["narrators"]) == 3
+    assert saved["narrators"][1] == {
+        "id": "narrator_2", "display_name": "Guest", "voice_name": list(VOICES)[1]
+    }
+    assert (config.ui["voice_volume"], config.ui["voice_rate"]) == (1.5, 1.2)
+
+    fresh = app()
+    assert fresh.toggle(key="narration_enabled").value
+    assert fresh.session_state["narration_data"]["narrators"] == saved["narrators"]
+    assert fresh.session_state["narration_data"]["segments"] == []
+    assert widget(fresh.selectbox, "voice_volume_select").value == 1.5
+    assert widget(fresh.selectbox, "voice_rate_select").value == 1.2
+
+
+def test_imported_multi_narrator_configuration_clears_stale_widgets_and_work(app_environment):
+    page = app()
+    page.toggle(key="narration_enabled").set_value(True).run()
+    data = page.session_state["narration_data"]
+    data["segments"] = [{"key": 1, "speaker_id": "narrator_1", "text": "Old work."}]
+    data["drafts"] = {"Tagged text": "Old draft", "JSON": "{}"}
+    data["full_preview"] = "old-preview.mp3"
+    page.session_state["narration_name_narrator_1"] = "Stale widget"
+    settings = {
+        "enabled": True,
+        "narrators": [
+            {"id": "narrator_8", "display_name": "Host", "voice_name": list(VOICES)[0]},
+            {"id": "narrator_9", "display_name": "Guest", "voice_name": list(VOICES)[1]},
+        ],
+    }
+    page.session_state["settings_preset_payload"] = {
+        "video_subject": "Topic", "video_script": "", "voice_name": list(VOICES)[0],
+        "voice_volume": 1.5, "voice_rate": 1.2, "multi_narrator": settings,
+    }
+    page.run()
+    assert not page.exception
+    assert page.session_state["narration_data"]["narrators"] == settings["narrators"]
+    assert page.session_state["narration_data"]["segments"] == []
+    assert "full_preview" not in page.session_state["narration_data"]
+    assert page.text_input(key="narration_name_narrator_8").value == "Host"
+    assert widget(page.selectbox, "voice_volume_select").value == 1.5
+    assert widget(page.selectbox, "voice_rate_select").value == 1.2
+
+
 @pytest.mark.parametrize("mode", ["upload", "none"])
 def test_real_gui_incompatible_modes_are_unavailable_and_restored_when_off(
     app_environment, mode
