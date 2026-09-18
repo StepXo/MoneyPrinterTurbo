@@ -26,6 +26,8 @@ def headless_task_app(tmp_path, monkeypatch):
 
     monkeypatch.setattr(utils, "task_dir", lambda: str(tasks_dir))
     monkeypatch.setattr(sm.state, "get_all_tasks", lambda *_args, **_kwargs: ([], 0))
+    # NumPy inspects sys.platform while importing. Load it before simulating Linux.
+    __import__("numpy")
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
